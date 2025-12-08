@@ -406,5 +406,429 @@ ggplot(pca_df, aes(PC1, PC2, colour = Project)) +
   )
 
 
+####################################################################
+######################## Alpha Diversity ###########################
+####################################################################
+
+
+library(phyloseq)
+library(dplyr)
+library(tibble)
+library(ggpubr)
+library(rstatix)
+library(patchwork)
+
+## ---------- 1. Estimate alpha diversity ----------
+
+# Use your new merged phyloseq object:
+#   phy_all = merged, cleaned phyloseq with Organism in sample_data
+alpha_diversity <- estimate_richness(phy_all)
+print(alpha_diversity)
+
+# Add sample ID column
+alpha_diversity$Sample <- rownames(alpha_diversity)
+
+# Select indices of interest
+selected_df <- alpha_diversity[, c("Sample", "Observed", "Chao1", "Simpson", "Shannon")]
+rownames(selected_df) <- NULL
+
+## ---------- 2. Build metadata + statframe ----------
+
+# metadata from phy_all
+metadata <- sample_data(phy_all) %>%
+  data.frame(stringsAsFactors = FALSE)
+metadata$Sample <- rownames(metadata)
+
+# variables for statframe
+samples      <- metadata$Sample
+organisms    <- metadata$Organism
+shannonscore <- alpha_diversity$Shannon
+simpsonscore <- alpha_diversity$Simpson
+chaoscore    <- alpha_diversity$Chao1
+observed     <- alpha_diversity$Observed
+
+statframe <- data.frame(samples, organisms, shannonscore, simpsonscore, chaoscore, observed)
+head(statframe[1:5, 1:5])
+
+## ---------- 3. Normality checks ----------
+
+shapiro.shan     <- shapiro_test(alpha_diversity$Shannon)$p.value
+shapiro.chao     <- shapiro_test(alpha_diversity$Chao1)$p.value
+shapiro.simp     <- shapiro_test(alpha_diversity$Simpson)$p.value
+shapiro.observed <- shapiro_test(alpha_diversity$Observed)$p.value
+
+# quick visual check
+histogram(alpha_diversity$Shannon)
+
+## ---------- 4. Global tests (ANOVA or Kruskal) ----------
+
+if (shapiro.shan < 0.05) {
+  result.kruskal.shannon <- statframe %>% kruskal_test(shannonscore ~ organisms)
+}
+if (shapiro.shan > 0.05) {
+  result.anova.shannon <- statframe %>% anova_test(shannonscore ~ organisms)
+}
+
+if (shapiro.simp < 0.05) {
+  result.kruskal.simpson <- statframe %>% kruskal_test(simpsonscore ~ organisms)
+}
+if (shapiro.simp > 0.05) {
+  result.anova.simpson <- statframe %>% anova_test(simpsonscore ~ organisms)
+}
+
+if (shapiro.chao < 0.05) {
+  result.kruskal.chao <- statframe %>% kruskal_test(chaoscore ~ organisms)
+}
+if (shapiro.chao > 0.05) {
+  result.anova.chao <- statframe %>% anova_test(chaoscore ~ organisms)   # fixed typo
+}
+
+if (shapiro.observed < 0.05) {
+  result.kruskal.observed <- statframe %>% kruskal_test(observed ~ organisms)
+}
+if (shapiro.observed > 0.05) {
+  result.anova.observed <- statframe %>% anova_test(observed ~ organisms)
+}
+
+## ---------- 5. Pairwise tests ----------
+
+if (exists("result.kruskal.shannon")) {
+  pwc.shannon <- statframe %>%
+    dunn_test(shannonscore ~ organisms, p.adjust.method = "bonferroni")
+}
+if (exists("result.anova.shannon")) {
+  pwc.shannon <- statframe %>%
+    tukey_hsd(shannonscore ~ organisms)
+}
+
+if (exists("result.kruskal.simpson")) {
+  pwc.simpson <- statframe %>%
+    dunn_test(simpsonscore ~ organisms, p.adjust.method = "bonferroni")
+}
+if (exists("result.anova.simpson")) {
+  pwc.simpson <- statframe %>%
+    tukey_hsd(simpsonscore ~ organisms)
+}
+
+if (exists("result.kruskal.chao")) {
+  pwc.chao <- statframe %>%
+    dunn_test(chaoscore ~ organisms, p.adjust.method = "bonferroni")
+}
+if (exists("result.anova.chao")) {
+  pwc.chao <- statframe %>%
+    tukey_hsd(chaoscore ~ organisms)
+}
+
+if (exists("result.kruskal.observed")) {
+  pwc.observed <- statframe %>%
+    dunn_test(observed ~ organisms, p.adjust.method = "bonferroni")
+}
+if (exists("result.anova.observed")) {
+  pwc.observed <- statframe %>%
+    tukey_hsd(observed ~ organisms)
+}
+
+################################
+## 6. PLOTS WITH P AIRWISE P  ##
+################################
+
+################# SHANNON #################
+
+pwc.shannon <- pwc.shannon %>% add_xy_position(x = "organisms")
+
+statplot.shannon <- ggviolin(
+  statframe,
+  x = "organisms",
+  y = "shannonscore",
+  title = "Shannon Diversity of Species",
+  fill = "organisms",
+  palette = "Paired"
+) +
+  theme(
+    plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title  = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 0),
+    axis.text.y = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    legend.title= element_text(size = 12, face = "bold"),
+    legend.position = "right"
+  ) +
+  stat_pvalue_manual(
+    pwc.shannon,
+    hide.ns = TRUE,
+    step.increase = 0.1
+  ) +
+  labs(caption = get_pwc_label(pwc.shannon))
+
+if (exists("result.kruskal.shannon")) {
+  statplot.shannon <- statplot.shannon +
+    labs(subtitle = get_test_label(result.kruskal.shannon, detailed = FALSE))
+}
+if (exists("result.anova.shannon")) {
+  statplot.shannon <- statplot.shannon +
+    labs(subtitle = get_test_label(result.anova.shannon, detailed = FALSE))
+}
+
+statplot.shannon
+
+################# SIMPSON #################
+
+pwc.simpson <- pwc.simpson %>% add_xy_position(x = "organisms")
+
+statplot.simpson <- ggviolin(
+  statframe,
+  x = "organisms",
+  y = "simpsonscore",
+  title = "Simpson Diversity of Species",
+  fill = "organisms",
+  palette = "Paired"
+) +
+  theme(
+    plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title  = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 0),
+    axis.text.y = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    legend.title= element_text(size = 12, face = "bold"),
+    legend.position = "right"
+  ) +
+  stat_pvalue_manual(
+    pwc.simpson,
+    hide.ns = TRUE,
+    step.increase = 0.1
+  ) +
+  labs(caption = get_pwc_label(pwc.simpson))
+
+if (exists("result.kruskal.simpson")) {
+  statplot.simpson <- statplot.simpson +
+    labs(subtitle = get_test_label(result.kruskal.simpson, detailed = FALSE))
+}
+if (exists("result.anova.simpson")) {
+  statplot.simpson <- statplot.simpson +
+    labs(subtitle = get_test_label(result.anova.simpson, detailed = FALSE))
+}
+
+################# CHAO #################
+
+pwc.chao <- pwc.chao %>% add_xy_position(x = "organisms")
+
+statplot.chao <- ggviolin(
+  statframe,
+  x = "organisms",
+  y = "chaoscore",
+  title = "Chao Diversity of Species",
+  fill = "organisms",
+  palette = "Paired"
+) +
+  theme(
+    plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title  = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 0),
+    axis.text.y = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    legend.title= element_text(size = 12, face = "bold"),
+    legend.position = "right"
+  ) +
+  stat_pvalue_manual(
+    pwc.chao,
+    hide.ns = TRUE,
+    step.increase = 0.1
+  ) +
+  labs(caption = get_pwc_label(pwc.chao))
+
+if (exists("result.kruskal.chao")) {
+  statplot.chao <- statplot.chao +
+    labs(subtitle = get_test_label(result.kruskal.chao, detailed = FALSE))
+}
+if (exists("result.anova.chao")) {
+  statplot.chao <- statplot.chao +
+    labs(subtitle = get_test_label(result.anova.chao, detailed = FALSE))
+}
+
+################# OBSERVED #################
+
+pwc.observed <- pwc.observed %>% add_xy_position(x = "organisms")
+
+statplot.observed <- ggviolin(
+  statframe,
+  x = "organisms",
+  y = "observed",
+  title = "Observed Diversity of Species",
+  fill = "organisms",
+  palette = "Paired"
+) +
+  theme(
+    plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title  = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 0),
+    axis.text.y = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    legend.title= element_text(size = 12, face = "bold"),
+    legend.position = "right"
+  ) +
+  stat_pvalue_manual(
+    pwc.observed,
+    hide.ns = TRUE,
+    step.increase = 0.1
+  ) +
+  labs(caption = get_pwc_label(pwc.observed))
+
+if (exists("result.kruskal.observed")) {
+  statplot.observed <- statplot.observed +
+    labs(subtitle = get_test_label(result.kruskal.observed, detailed = FALSE))
+}
+if (exists("result.anova.observed")) {
+  statplot.observed <- statplot.observed +
+    labs(subtitle = get_test_label(result.anova.observed, detailed = FALSE))
+}
+
+## --- Combine all four in 2x2 grid ---
+(statplot.shannon | statplot.simpson) /
+  (statplot.chao | statplot.observed) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+statplot.chao <- ggviolin(
+  statframe,
+  x = "organisms",
+  y = "chaoscore",
+  title = "Chao Diversity of Species",
+  fill = "organisms",
+  palette = "Paired"
+) +
+  geom_jitter(width = 0.15, alpha = 0.7, size = 1.8) +   # <-- JITTER ADDED
+  theme(
+    plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title  = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 0),
+    axis.text.y = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    legend.title= element_text(size = 12, face = "bold"),
+    legend.position = "right"
+  )
+
+# Add test subtitle (ANOVA or KW)
+if (exists("result.kruskal.chao")) {
+  statplot.chao <- statplot.chao +
+    labs(subtitle = get_test_label(result.kruskal.chao, detailed = FALSE))
+}
+if (exists("result.anova.chao")) {
+  statplot.chao <- statplot.chao +
+    labs(subtitle = get_test_label(result.anova.chao, detailed = FALSE))
+}
+statplot.chao
+
+statplot.shannon <- ggviolin(
+  statframe,
+  x = "organisms",
+  y = "shannonscore",
+  title = "Shannon Diversity of Species",
+  fill = "organisms",
+  palette = "Paired"
+) +
+  geom_jitter(width = 0.15, alpha = 0.7, size = 1.8) +
+  theme(
+    plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title  = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 0),
+    axis.text.y = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    legend.title= element_text(size = 12, face = "bold"),
+    legend.position = "right"
+  )
+
+if (exists("result.kruskal.shannon")) {
+  statplot.shannon <- statplot.shannon +
+    labs(subtitle = get_test_label(result.kruskal.shannon, detailed = FALSE))
+}
+if (exists("result.anova.shannon")) {
+  statplot.shannon <- statplot.shannon +
+    labs(subtitle = get_test_label(result.anova.shannon, detailed = FALSE))
+}
+statplot.shannon
+
+
+
+statplot.simpson <- ggviolin(
+  statframe,
+  x = "organisms",
+  y = "simpsonscore",
+  title = "Simpson Diversity of Species",
+  fill = "organisms",
+  palette = "Paired"
+) +
+  geom_jitter(width = 0.15, alpha = 0.7, size = 1.8) +
+  theme(
+    plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title  = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 0),
+    axis.text.y = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    legend.title= element_text(size = 12, face = "bold"),
+    legend.position = "right"
+  )
+
+if (exists("result.kruskal.simpson")) {
+  statplot.simpson <- statplot.simpson +
+    labs(subtitle = get_test_label(result.kruskal.simpson, detailed = FALSE))
+}
+if (exists("result.anova.simpson")) {
+  statplot.simpson <- statplot.simpson +
+    labs(subtitle = get_test_label(result.anova.simpson, detailed = FALSE))
+}
+
+statplot.simpson
+
+
+statplot.observed <- ggviolin(
+  statframe,
+  x = "organisms",
+  y = "observed",
+  title = "Observed Diversity of Species",
+  fill = "organisms",
+  palette = "Paired"
+) +
+  geom_jitter(width = 0.15, alpha = 0.7, size = 1.8) +
+  theme(
+    plot.title  = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title  = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 0),
+    axis.text.y = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    legend.title= element_text(size = 12, face = "bold"),
+    legend.position = "right"
+  )
+
+if (exists("result.kruskal.observed")) {
+  statplot.observed <- statplot.observed +
+    labs(subtitle = get_test_label(result.kruskal.observed, detailed = FALSE))
+}
+if (exists("result.anova.observed")) {
+  statplot.observed <- statplot.observed +
+    labs(subtitle = get_test_label(result.anova.observed, detailed = FALSE))
+}
+statplot.observed
+
+
+
+(statplot.shannon | statplot.simpson) /
+  (statplot.chao    | statplot.observed) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+
 
 
