@@ -830,5 +830,153 @@ statplot.observed
   theme(legend.position = "bottom")
 
 
+####################################################################
+######################## PCoA ######################################
+####################################################################
+
+
+
+library(phyloseq)
+library(vegan)
+library(ggplot2)
+
+## use your merged phyloseq object
+ps <- phy_all   # or physeq_combined if you kept that name
+
+## Bray–Curtis distance
+dist_bray <- phyloseq::distance(ps, method = "bray")
+
+## PCoA ordination
+ord_bray <- ordinate(ps, method = "PCoA", distance = dist_bray)
+
+## metadata
+meta <- data.frame(sample_data(ps))
+
+## ----- PERMANOVA by Host (if column exists) -----
+if ("Host" %in% colnames(meta)) {
+  # make sure rows of metadata line up with distance labels
+  samples <- attr(dist_bray, "Labels")
+  meta_host <- meta[samples, , drop = FALSE]
+  
+  adonis_host <- adonis2(dist_bray ~ Host, data = meta_host, permutations = 999)
+  pval_host   <- adonis_host$`Pr(>F)`[1]
+  r2_host     <- adonis_host$R2[1]
+  label_host  <- paste0("PERMANOVA: R² = ",
+                        round(r2_host, 3),
+                        ", p = ",
+                        signif(pval_host, 3))
+  
+  p_bray_host <- plot_ordination(ps, ord_bray, color = "Host") +
+    geom_point(size = 3) +
+    theme_minimal() +
+    labs(
+      title    = "Bray–Curtis PCoA by Host",
+      subtitle = label_host
+    )
+}
+
+## ----- PERMANOVA by Organism (if column exists) -----
+if ("Organism" %in% colnames(meta)) {
+  samples <- attr(dist_bray, "Labels")
+  meta_org <- meta[samples, , drop = FALSE]
+  
+  adonis_org <- adonis2(dist_bray ~ Organism, data = meta_org, permutations = 999)
+  pval_org   <- adonis_org$`Pr(>F)`[1]
+  r2_org     <- adonis_org$R2[1]
+  label_org  <- paste0("PERMANOVA: R² = ",
+                       round(r2_org, 3),
+                       ", p = ",
+                       signif(pval_org, 3))
+  
+  p_bray_org <- plot_ordination(ps, ord_bray, color = "Organism") +
+    geom_point(size = 3) +
+    theme_minimal() +
+    labs(
+      title    = "Bray–Curtis PCoA by Organism",
+      subtitle = label_org
+    )
+}
+
+## ---- show them ----
+if (exists("p_bray_host")) print(p_bray_host)
+if (exists("p_bray_org"))  print(p_bray_org)
+
+library(phyloseq)
+library(vegan)
+library(ggplot2)
+library(patchwork)
+
+ps <- phy_all       # your merged phyloseq object
+group_var <- "Organism"
+
+methods <- c("bray", "jaccard_pa", "canberra", "ruzicka")
+
+make_pcoa_plot <- function(ps, method, group_var = "Organism") {
+  
+  # ---- Distance matrix ----
+  if (method == "jaccard_pa") {
+    otu <- as(otu_table(ps), "matrix")
+    if (taxa_are_rows(ps)) otu <- t(otu)
+    dist_mat <- vegan::vegdist(otu, method = "jaccard", binary = TRUE)
+    method_title <- "Jaccard (presence/absence)"
+    
+  } else if (method == "ruzicka") {
+    otu <- as(otu_table(ps), "matrix")
+    if (taxa_are_rows(ps)) otu <- t(otu)
+    dist_mat <- vegan::vegdist(otu, method = "jaccard", binary = FALSE)
+    method_title <- "Ružička (quantitative Jaccard)"
+    
+  } else {
+    dist_mat <- phyloseq::distance(ps, method = method)
+    method_title <- toupper(method)
+  }
+  
+  # ---- Align metadata ----
+  samples <- attr(dist_mat, "Labels")
+  meta <- data.frame(sample_data(ps))[samples, , drop = FALSE]
+  meta$Group <- meta[[group_var]]
+  
+  # ---- Ordination ----
+  ord <- ordinate(ps, method = "PCoA", distance = dist_mat)
+  
+  # ---- PERMANOVA ----
+  ad <- vegan::adonis2(dist_mat ~ Group, data = meta, permutations = 999)
+  r2 <- round(ad$R2[1], 3)
+  p  <- signif(ad$`Pr(>F)`[1], 3)
+  
+  # ---- Plot ----
+  p_plot <- plot_ordination(ps, ord, color = group_var) +
+    geom_point(size = 2.5, alpha = 0.8) +
+    theme_minimal() +
+    labs(
+      title    = paste("PCoA –", method_title),
+      subtitle = paste0("PERMANOVA: R² = ", r2, "  p = ", p),
+      color    = group_var
+    ) +
+    theme(
+      legend.position = "right",
+      plot.title    = element_text(face = "bold")
+    )
+  
+  list(plot = p_plot, dist = dist_mat)
+}
+
+# ---- Build plots ----
+plots <- list()
+dist_mats <- list()
+
+for (m in methods) {
+  res <- make_pcoa_plot(ps, m, group_var)
+  plots[[m]] <- res$plot
+  dist_mats[[m]] <- res$dist
+}
+
+# ---- Combine ----
+combined_pcoa_plot <- wrap_plots(plots, ncol = 2, guides = "collect") &
+  theme(legend.position = "right")
+
+print(combined_pcoa_plot)
+
+
 
 
