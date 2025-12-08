@@ -310,3 +310,101 @@ plots_list[["Class"]]
 plots_list[["Order"]]
 plots_list[["Family"]]
 plots_list[["Genus"]]
+
+
+
+####################################################################
+######################## PCA #######################################
+####################################################################
+
+# physeq_rarefied_filtered = your list of final cleaned phyloseq objects
+
+# Label each phyloseq object with its PRJNA name
+phy_list_labeled <- imap(physeq_rarefied_filtered, ~{
+  ps <- .x
+  proj <- .y
+  
+  # Ensure sample_data exists
+  if (is.null(sample_data(ps, errorIfNULL = FALSE))) {
+    sample_data(ps) <- data.frame(row.names = sample_names(ps))
+  }
+  
+  sample_data(ps)$Project <- proj
+  ps
+})
+
+# Merge EVERYTHING into one phyloseq object
+phy_all <- Reduce(merge_phyloseq, phy_list_labeled)
+
+
+# Extract OTU table as matrix
+otu <- as(otu_table(phy_all), "matrix")
+if (taxa_are_rows(phy_all)) otu <- t(otu)
+
+# Run PCA
+pca <- prcomp(otu, scale. = TRUE, center = TRUE)
+
+# Convert PCA scores to dataframe
+pca_df <- as.data.frame(pca$x) %>%
+  tibble::rownames_to_column("SampleID")
+
+# Metadata
+meta <- sample_data(phy_all) %>%
+  data.frame(stringsAsFactors = FALSE) %>%
+  tibble::rownames_to_column("SampleID")
+
+# Merge PCA + metadata
+pca_df <- left_join(pca_df, meta, by = "SampleID")
+
+# Ensure Project is a clean factor
+pca_df$Project <- as.character(pca_df$Project)
+pca_df$Project <- factor(pca_df$Project, levels = sort(unique(pca_df$Project)))
+
+library(Polychrome)
+
+# number of PRJNA groups
+n_proj <- length(levels(pca_df$Project))
+n_proj <- as.integer(n_proj)   # MUST be integer for Polychrome
+
+# generate palette safely
+pal_vec <- tryCatch(
+  {
+    if (n_proj <= 22) {
+      Polychrome::kelly(n_proj)
+    } else {
+      Polychrome::alphabet(n_proj)
+    }
+  },
+  error = function(e) {
+    message("⚠ Polychrome failed, switching to fallback palette.")
+    grDevices::rainbow(n_proj)  # fallback for safety
+  }
+)
+
+# assign names for ggplot
+names(pal_vec) <- levels(pca_df$Project)
+
+
+
+# Variance explained
+pca_var <- pca$sdev^2
+pca_var_exp <- pca_var / sum(pca_var)
+pc1_lab <- paste0("PC1 (", round(100 * pca_var_exp[1], 1), "%)")
+pc2_lab <- paste0("PC2 (", round(100 * pca_var_exp[2], 1), "%)")
+
+
+ggplot(pca_df, aes(PC1, PC2, colour = Project)) +
+  geom_point(size = 2) +
+  facet_wrap(~ Organism) +
+  scale_colour_manual(values = pal_vec) +
+  theme_minimal() +
+  labs(
+    title = "PCA of Microbial Communities by Organism",
+    color = "PRJNA Project",
+    x = pc1_lab,
+    y = pc2_lab
+  )
+
+
+
+
