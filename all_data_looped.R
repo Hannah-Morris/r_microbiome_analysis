@@ -1283,6 +1283,7 @@ core_plots_by_species$`P.monodon gut metagenome`
 core_plots_by_species$`P.clarkii gut metagenome`
 core_plots_by_species$`P.leniusculus gut metagenome`
 core_plots_by_species$`M.nipponese gut metagenome`
+x
 
 
 ###############################################################################
@@ -1304,6 +1305,112 @@ comp_df_heat <- build_composition_df(
   rank = heat_rank,
   mean_threshold = 0.002
 )
+
+###############################################################################
+############### HEATMAP PER SPECIES — TAXA ≥ 1% RELATIVE ABUND ################
+###############################################################################
+
+library(pheatmap)
+library(dplyr)
+library(tidyr)
+
+## Set rank used in your earlier filtering:
+heat_rank <- "Genus"     # can be "Phylum", "Class", etc.
+
+## Threshold for mean relative abundance:
+abundance_cutoff <- 0.01   # 1%
+
+## comp_df_heat must already exist from:
+# comp_df_heat <- build_composition_df(...)
+
+## 1. Function to make heatmap for ONE species
+make_species_heatmap_over1 <- function(comp_df, species_name, tax_label = heat_rank,
+                                       cutoff = 0.01) {
+  
+  message("\n=== Building ≥1% heatmap for species: ", species_name, " ===")
+  
+  # Subset to this species
+  sub <- comp_df %>%
+    filter(Organism == species_name)
+  
+  if (nrow(sub) == 0) {
+    warning("No rows for species: ", species_name)
+    return(NULL)
+  }
+  
+  # Build taxon × sample matrix
+  mat_df <- sub %>%
+    select(Sample, Taxon, Abundance) %>%
+    group_by(Taxon, Sample) %>%
+    summarise(Abundance = sum(Abundance), .groups = "drop") %>%
+    pivot_wider(
+      names_from = Sample,
+      values_from = Abundance,
+      values_fill = 0
+    )
+  
+  # Extract matrix
+  taxa <- mat_df$Taxon
+  mat_df$Taxon <- NULL
+  abund_mat <- as.matrix(mat_df)
+  rownames(abund_mat) <- taxa
+  
+  # Compute mean abundance per taxon
+  mean_abund <- rowMeans(abund_mat)
+  
+  # Filter ≥ 1% mean relative abundance
+  keep_taxa <- names(mean_abund[mean_abund >= cutoff])
+  
+  if (length(keep_taxa) == 0) {
+    warning("No taxa ≥ ", cutoff, " for species ", species_name)
+    return(NULL)
+  }
+  
+  abund_mat <- abund_mat[keep_taxa, , drop = FALSE]
+  
+  # Log transform for visualization
+  abund_mat_plot <- log10(abund_mat + 1e-5)
+  
+  # Build sample metadata annotation
+  annot <- sub %>%
+    select(Sample, Organism, Host, Study, Project, Region_amplified) %>%
+    distinct()
+  
+  # Align annotation to samples in matrix
+  annot <- annot[match(colnames(abund_mat_plot), annot$Sample), , drop = FALSE]
+  rownames(annot) <- annot$Sample
+  annot$Sample <- NULL
+  
+  # Draw heatmap
+  pheatmap(
+    abund_mat_plot,
+    annotation_col = annot,
+    cluster_rows = TRUE,
+    cluster_cols = TRUE,
+    scale = "row",
+    fontsize = 9,
+    main = paste0("Taxa ≥ 1% (", tax_label, ") — ", species_name)
+  )
+}
+
+## 2. Generate heatmaps for all species
+species_vec <- sort(unique(comp_df_heat$Organism))
+
+heatmaps_over1_by_species <- list()
+
+for (sp in species_vec) {
+  heatmaps_over1_by_species[[sp]] <- make_species_heatmap_over1(
+    comp_df = comp_df_heat,
+    species_name = sp,
+    tax_label = heat_rank,
+    cutoff = abundance_cutoff
+  )
+}
+
+## 3. Example: show heatmap for L. vannamei
+# heatmaps_over1_by_species$`L.vannamei gut metagenome`
+
+
 
 ## 3. Function to make ONE heatmap for a given species
 make_species_heatmap_from_df <- function(comp_df, species_name,
