@@ -978,5 +978,309 @@ combined_pcoa_plot <- wrap_plots(plots, ncol = 2, guides = "collect") &
 print(combined_pcoa_plot)
 
 
+###############################################################################
+######################### CORE MICROBIOME ANALYSIS ############################
+###############################################################################
 
+# Choose rank for core microbiome (you can change this)
+core_rank <- "Class"   # or "Phylum", "Order", "Family", "Genus"
+
+# Extract all processed, filtered, aggregated phyloseq objects at this rank
+core_ps_list <- processed_phyloseq_by_rank[[core_rank]]
+
+if (length(core_ps_list) == 0) {
+  stop("❌ No phyloseq objects available for core microbiome at rank: ", core_rank)
+}
+
+cat("\n=== Building merged phyloseq for CORE microbiome at rank:", core_rank, "===\n")
+
+# -------------------------------------------------------------------------
+# 1. Union of all taxa
+# -------------------------------------------------------------------------
+all_taxa <- Reduce(union, lapply(core_ps_list, taxa_names))
+
+# -------------------------------------------------------------------------
+# 2. Build merged OTU table
+# -------------------------------------------------------------------------
+otu_fixed <- lapply(core_ps_list, function(ps) {
+  mat <- as(otu_table(ps), "matrix")
+  if (!taxa_are_rows(ps)) mat <- t(mat)
+  
+  out <- matrix(
+    0,
+    nrow = length(all_taxa),
+    ncol = ncol(mat),
+    dimnames = list(all_taxa, colnames(mat))
+  )
+  out[rownames(mat), ] <- mat
+  
+  otu_table(out, taxa_are_rows = TRUE)
+})
+
+otu_merged_core <- do.call(cbind, otu_fixed)
+## =========================
+## 3. BUILD LONG DATA FOR EACH RANK (NO MERGE OF PHYLOSEQ)
+## =========================
+
+build_composition_df <- function(phy_list, rank = "Phylum", mean_threshold = 0.002) {
+  
+  all_dfs <- list()
+  
+  for (nm in names(phy_list)) {
+    cat("\n=== Processing", nm, "at rank", rank, "===\n")
+    
+    ps <- process_tax_level_safe(phy_list[[nm]], rank = rank, mean_threshold = mean_threshold)
+    if (is.null(ps)) next
+    
+    # psmelt: long format with Sample, Abundance, taxonomy, metadata
+    df <- phyloseq::psmelt(ps)
+    
+    # check metadata columns exist
+    if (!all(required_cols %in% colnames(df))) {
+      cat("⚠ Skipping", nm, "— missing one of required metadata columns in melted data.\n")
+      next
+    }
+    
+    # check rank column exists
+    if (!rank %in% colnames(df)) {
+      cat("⚠ Skipping", nm, "— rank", rank, "not found in psmelt().\n")
+      next
+    }
+    
+    df_rank <- df %>%
+      dplyr::select(
+        Sample,
+        Organism,
+        Host,
+        Study,
+        Project,
+        Region_amplified,
+        Taxon = dplyr::all_of(rank),
+        Abundance
+      ) %>%
+      dplyr::filter(!is.na(Taxon), Taxon != "")
+    
+    all_dfs[[nm]] <- df_rank
+  }
+  
+  if (length(all_dfs) == 0) {
+    stop("No datasets survived processing at rank ", rank)
+  }
+  
+  dplyr::bind_rows(all_dfs, .id = "PRJNA")
+}
+
+## =========================
+## 4. PALETTE HELPER
+## =========================
+
+make_tax_palette <- function(taxa_names) {
+  uniq <- unique(taxa_names)
+  n <- length(uniq)
+  if (n <= 12) {
+    cols <- RColorBrewer::brewer.pal(max(n, 3), "Set3")[seq_len(n)]
+  } else {
+    cols <- grDevices::colorRampPalette(RColorBrewer::brewer.pal(12, "Set3"))(n)
+  }
+  names(cols) <- uniq
+  cols
+}
+
+## =========================
+## 5. GENERATE BAR PLOTS + STORE TABLES FOR EACH RANK
+## =========================
+
+tax_levels <- c("Phylum", "Class", "Order", "Family", "Genus")
+plots_list      <- list()
+comp_data_list  <- list()   # we’ll use this for core microbiome later
+
+for (rank in tax_levels) {
+  
+  cat("\n===============================\n")
+  cat("Processing rank:", rank, "\n")
+  cat("===============================\n")
+  
+  comp_df <- build_composition_df(
+    physeq_rarefied_filtered,
+    rank = rank,
+    mean_threshold = 0.002
+  )
+  comp_data_list[[rank]] <- comp_df
+  
+  # average by Organism, normalised so each Organism bar sums to 1
+  comp_org <- comp_df %>%
+    dplyr::group_by(Organism, Taxon) %>%
+    dplyr::summarise(mean_abund = mean(Abundance, na.rm = TRUE), .groups = "drop") %>%
+    dplyr::group_by(Organism) %>%
+    dplyr::mutate(Abundance = mean_abund / sum(mean_abund)) %>%
+    dplyr::ungroup()
+  
+  pal <- make_tax_palette(comp_org$Taxon)
+  
+  p <- ggplot2::ggplot(comp_org, ggplot2::aes(x = Organism, y = Abundance, fill = Taxon)) +
+    ggplot2::geom_bar(stat = "identity") +
+    ggplot2::scale_fill_manual(values = pal, drop = FALSE) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+      axis.text.x         = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1),
+      panel.grid.major.x  = ggplot2::element_blank()
+    ) +
+    ggplot2::ggtitle(paste("Composition at", rank)) +
+    ggplot2::ylab("Mean relative abundance") +
+    ggplot2::xlab("Organism")
+  
+  plots_list[[rank]] <- p
+}
+
+## =========================
+## 6. BUILD COMBINED PHYLOSEQ FROM LONG DATA (FOR CORE)
+## =========================
+
+build_phyloseq_from_comp <- function(comp_df, rank = "Class") {
+  
+  # 1. Aggregate abundance per Sample–Taxon (just in case)
+  comp_agg <- comp_df %>%
+    dplyr::group_by(Sample, Taxon) %>%
+    dplyr::summarise(Abundance = mean(Abundance, na.rm = TRUE), .groups = "drop")
+  
+  # 2. OTU table: taxa x samples
+  otu_wide <- comp_agg %>%
+    tidyr::pivot_wider(
+      names_from  = Sample,
+      values_from = Abundance,
+      values_fill = 0
+    )
+  
+  taxa <- otu_wide$Taxon
+  otu_mat <- as.matrix(otu_wide[, -1, drop = FALSE])
+  rownames(otu_mat) <- taxa
+  
+  otu_tab <- phyloseq::otu_table(otu_mat, taxa_are_rows = TRUE)
+  
+  # 3. Sample metadata from comp_df (one row per Sample)
+  meta <- comp_df %>%
+    dplyr::select(Sample, dplyr::all_of(required_cols)) %>%
+    dplyr::distinct() %>%
+    dplyr::group_by(Sample) %>%
+    dplyr::summarise(
+      dplyr::across(
+        dplyr::everything(),
+        ~ {
+          x <- .x
+          x <- x[!is.na(x)]
+          if (length(x) == 0) NA_character_ else as.character(x[1])
+        }
+      ),
+      .groups = "drop"
+    )
+  
+  meta_df <- as.data.frame(meta)
+  rownames(meta_df) <- meta_df$Sample
+  meta_df$Sample <- NULL
+  
+  sd_tab <- phyloseq::sample_data(meta_df)
+  
+  # 4. Minimal taxonomy table for the chosen rank
+  tax_df <- data.frame(row.names = taxa)
+  tax_df[[rank]] <- taxa   # just store the taxon name under this rank
+  tax_tab <- phyloseq::tax_table(as.matrix(tax_df))
+  
+  phyloseq::phyloseq(otu_tab, tax_tab, sd_tab)
+}
+
+## =========================
+## 7. CORE MICROBIOME AT A GIVEN RANK (e.g. CLASS)
+## =========================
+
+# Choose the rank you want for core analysis:
+core_rank <- "Class"   # or "Phylum", "Order", "Family", "Genus"
+
+# 1. Get the long compositional data for this rank
+comp_df_core <- comp_data_list[[core_rank]]
+
+# 2. Build a combined phyloseq object from it
+phy_core <- build_phyloseq_from_comp(comp_df_core, rank = core_rank)
+
+# 3. Ensure compositional (should already be, but safe)
+phy_core_comp <- microbiome::transform(phy_core, "compositional")
+
+# 4. Define detection & prevalence thresholds (as in your original script)
+detections  <- round(10^seq(log10(0.01), log10(0.2), length = 9), 3)
+prevalences <- seq(0.05, 1, 0.05)
+core_cols   <- c("yellow", "blue")
+
+# 5. Plot core microbiome heatmap
+core1 <- microbiome::plot_core(
+  phy_core_comp,
+  plot.type    = "heatmap",
+  prevalences  = prevalences,
+  colours      = core_cols,
+  detections   = detections,
+  min.prevalence = 0.8
+) +
+  ggplot2::labs(x = "Detection Threshold\n(Relative Abundance (%))")
+
+core1
+
+
+
+## ============================================================
+## 8. CORE MICROBIOME SEPARATELY FOR EACH ORGANISM 
+## ============================================================
+
+# detection & prevalence settings (same as earlier)
+detections  <- round(10^seq(log10(0.01), log10(0.2), length = 9), 3)
+prevalences <- seq(0.05, 1, 0.05)
+core_cols   <- c("yellow", "blue")
+
+# Extract list of species present
+species_list <- unique(sample_data(phy_core_comp)$Organism)
+
+core_plots_by_species <- list()
+
+cat("\n===============================\n")
+cat("Generating core microbiome plots per species (Organism)\n")
+cat("===============================\n")
+
+for (sp in species_list) {
+  
+  cat("\n--- Processing species:", sp, "---\n")
+  
+  # subset phyloseq object to this species
+  ps_sp <- subset_samples(phy_core_comp, Organism == sp)
+  
+  # Drop taxa not present after subsetting
+  ps_sp <- prune_taxa(taxa_sums(ps_sp) > 0, ps_sp)
+  
+  # Skip if fewer than 2 samples remain
+  if (nsamples(ps_sp) < 2) {
+    cat("⚠ Skipping", sp, ": too few samples for core analysis.\n")
+    next
+  }
+  
+  # Core microbiome heatmap for this species
+  p <- microbiome::plot_core(
+    ps_sp,
+    plot.type      = "heatmap",
+    prevalences    = prevalences,
+    colours        = core_cols,
+    detections     = detections,
+    min.prevalence = 0.8
+  ) +
+    ggplot2::ggtitle(paste("Core Microbiome (", core_rank, ") —", sp)) +
+    ggplot2::labs(x = "Detection Threshold\n(Relative Abundance (%))")
+  
+  core_plots_by_species[[sp]] <- p
+}
+
+cat("\n✓ DONE! Use core_plots_by_species$`SpeciesName` to view plots.\n")
+
+core_plots_by_species$`L.vannamei gut metagenome`
+core_plots_by_species$`C.quadricarinatus gut metagenome`
+core_plots_by_species$`C.cainii gut metagenome`
+core_plots_by_species$`P.argus gut metagenome`
+core_plots_by_species$`P.monodon gut metagenome`
+core_plots_by_species$`P.clarkii gut metagenome`
+core_plots_by_species$`P.leniusculus gut metagenome`
+core_plots_by_species$`M.nipponese gut metagenome`
 
