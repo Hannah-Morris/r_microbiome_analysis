@@ -1284,3 +1284,125 @@ core_plots_by_species$`P.clarkii gut metagenome`
 core_plots_by_species$`P.leniusculus gut metagenome`
 core_plots_by_species$`M.nipponese gut metagenome`
 
+
+###############################################################################
+######################## HEATMAP PER SPECIES (TOP N TAXA) #####################
+###############################################################################
+
+library(pheatmap)
+library(dplyr)
+library(tidyr)
+
+## 1. Choose taxonomic rank + top N taxa
+heat_rank <- "Genus"   # or "Phylum", "Class", "Order", "Family"
+top_n     <- 30
+
+## 2. Build long composition table at that rank
+##    This reuses your existing filtering (bacteria-only, abundance threshold)
+comp_df_heat <- build_composition_df(
+  physeq_rarefied_filtered,
+  rank = heat_rank,
+  mean_threshold = 0.002
+)
+
+## 3. Function to make ONE heatmap for a given species
+make_species_heatmap_from_df <- function(comp_df, species_name,
+                                         top_n = 30,
+                                         tax_label = heat_rank) {
+  
+  message("\n=== Building heatmap for species: ", species_name, " ===")
+  
+  # Subset to this species
+  sub <- comp_df %>%
+    dplyr::filter(Organism == species_name)
+  
+  if (nrow(sub) == 0) {
+    warning("No rows for species: ", species_name, " — skipping.")
+    return(NULL)
+  }
+  
+  # 3a. Build Taxon x Sample matrix of abundances
+  mat_df <- sub %>%
+    dplyr::select(Sample, Taxon, Abundance) %>%
+    dplyr::group_by(Taxon, Sample) %>%
+    dplyr::summarise(Abundance = sum(Abundance, na.rm = TRUE),
+                     .groups = "drop") %>%
+    tidyr::pivot_wider(
+      names_from  = Sample,
+      values_from = Abundance,
+      values_fill = 0
+    )
+  
+  # rownames = taxa
+  tax_labels <- mat_df$Taxon
+  mat_df$Taxon <- NULL
+  abund_mat <- as.matrix(mat_df)
+  rownames(abund_mat) <- tax_labels
+  
+  # 3b. Pick top N taxa by total abundance
+  if (nrow(abund_mat) == 0) {
+    warning("No taxa left for species: ", species_name)
+    return(NULL)
+  }
+  
+  n_taxa_available <- nrow(abund_mat)
+  n_to_take <- min(top_n, n_taxa_available)
+  top_taxa <- names(sort(rowSums(abund_mat), decreasing = TRUE))[1:n_to_take]
+  abund_mat <- abund_mat[top_taxa, , drop = FALSE]
+  
+  # 3c. Optional log transform
+  abund_mat_plot <- log10(abund_mat + 1e-5)
+  
+  # 3d. Build sample annotation from comp_df
+  annot <- sub %>%
+    dplyr::select(
+      Sample,
+      Organism,
+      Host,
+      Study,
+      Project,
+      Region_amplified
+    ) %>%
+    dplyr::distinct()
+  
+  # Align annotation rows to matrix columns
+  annot <- annot %>%
+    dplyr::filter(Sample %in% colnames(abund_mat_plot))
+  
+  rownames(annot) <- annot$Sample
+  annot$Sample <- NULL
+  
+  # Final safety check
+  annot <- annot[colnames(abund_mat_plot), , drop = FALSE]
+  
+  # 3e. Draw heatmap
+  pheatmap(
+    abund_mat_plot,
+    annotation_col = annot,
+    cluster_rows   = TRUE,
+    cluster_cols   = TRUE,
+    scale          = "row",
+    fontsize       = 9,
+    main           = paste0(
+      "Top ", n_to_take, " ", tax_label,
+      " — ", species_name
+    )
+  )
+}
+
+## 4. Build heatmaps for ALL species (stored in a list, but also plotted)
+species_vec <- sort(unique(comp_df_heat$Organism))
+
+heatmaps_by_species <- list()
+
+for (sp in species_vec) {
+  heatmaps_by_species[[sp]] <- make_species_heatmap_from_df(
+    comp_df = comp_df_heat,
+    species_name = sp,
+    top_n = top_n,
+    tax_label = heat_rank
+  )
+}
+
+## 5. To re-draw a specific species heatmap, e.g. vannamei:
+# heatmaps_by_species$`L.vannamei gut metagenome`
