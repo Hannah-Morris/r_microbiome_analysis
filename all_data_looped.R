@@ -24,7 +24,7 @@ prjna_codes <- c(
   "422950","1087723","495902","291010","417739","1012318","780955",
   "731310","749331","717320","797514","577421","600476","682282",
   "553862","540737","831321","505066","609648","573062","354668",
-  "549032","579035"
+  "549032","579035", "689097", "429671", "1044169"
 )
 
 ## =========================
@@ -310,6 +310,94 @@ plots_list[["Class"]]
 plots_list[["Order"]]
 plots_list[["Family"]]
 plots_list[["Genus"]]
+
+
+
+####################################################################
+######################## SORTED COMP PLOT:##########################
+####################################################################
+## ================================
+## ONE PLOT PER ORGANISM
+## PRJNA as bar labels
+## ================================
+
+library(tidyverse)
+library(RColorBrewer)
+
+## --- choose rank to plot ---
+rank_to_plot <- "Phylum"   # change if needed: "Class", "Order", ...
+
+comp_df <- comp_data_list[[rank_to_plot]]
+
+if (is.null(comp_df)) stop("comp_df for that tax rank does not exist.")
+
+## ================================
+## PREPARE DATA
+## ================================
+plot_df <- comp_df %>%
+  mutate(PRJNA = factor(PRJNA)) %>%      # ensure PRJNA is a factor
+  group_by(Organism, PRJNA, Taxon) %>%
+  summarise(Abundance = mean(Abundance), .groups = "drop") %>%
+  group_by(Organism, PRJNA) %>%
+  mutate(Abundance = Abundance / sum(Abundance)) %>%  # normalise within PRJNA
+  ungroup()
+
+## ================================
+## COLOUR PALETTE
+## ================================
+make_tax_palette <- function(taxa_names) {
+  uniq <- unique(taxa_names)
+  n <- length(uniq)
+  if (n <= 12) {
+    cols <- brewer.pal(max(n, 3), "Set3")[seq_len(n)]
+  } else {
+    cols <- colorRampPalette(brewer.pal(12, "Set3"))(n)
+  }
+  names(cols) <- uniq
+  cols
+}
+
+pal <- make_tax_palette(plot_df$Taxon)
+
+## ================================
+## SPLIT BY ORGANISM AND PLOT
+## ================================
+organisms <- unique(plot_df$Organism)
+
+plots_list_optionA <- list()
+
+for (org in organisms) {
+  
+  df_sub <- plot_df %>% filter(Organism == org)
+  
+  p <- ggplot(df_sub, aes(x = PRJNA, y = Abundance, fill = Taxon)) +
+    geom_bar(stat = "identity") +
+    scale_fill_manual(values = pal, drop = FALSE) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+      strip.text = element_text(face = "bold", size = 16),
+      panel.grid.major.x = element_blank()
+    ) +
+    labs(
+      title = paste("Taxonomic Composition at", rank_to_plot, "\nOrganism:", org),
+      x = "PRJNA Project ID",
+      y = "Relative Abundance"
+    )
+  
+  plots_list_optionA[[org]] <- p
+  
+  ## save each as PNG
+  ggsave(
+    filename = paste0("composition_", rank_to_plot, "_", gsub(" ", "_", org), ".png"),
+    plot = p,
+    width = 10, height = 6, dpi = 300
+  )
+  
+  print(p)  # show each plot one at a time
+}
+
+
 
 
 
@@ -1513,3 +1601,5 @@ for (sp in species_vec) {
 
 ## 5. To re-draw a specific species heatmap, e.g. vannamei:
 # heatmaps_by_species$`L.vannamei gut metagenome`
+
+
