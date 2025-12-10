@@ -316,35 +316,36 @@ plots_list[["Genus"]]
 ####################################################################
 ######################## SORTED COMP PLOT:##########################
 ####################################################################
-## ================================
-## ONE PLOT PER ORGANISM
-## PRJNA as bar labels
-## ================================
+## ======================================================
+##  ONE PLOT PER ORGANISM
+##  + Region_amplified colour bar under bars
+## ======================================================
 
 library(tidyverse)
 library(RColorBrewer)
+library(patchwork)
 
-## --- choose rank to plot ---
-rank_to_plot <- "Phylum"   # change if needed: "Class", "Order", ...
+## ===========
+## 1. SETTINGS
+## ===========
+rank_to_plot <- "Phylum"   # "Class" / "Order" / "Family" / "Genus"
 
 comp_df <- comp_data_list[[rank_to_plot]]
+if (is.null(comp_df)) stop("comp_data_list does not contain this rank")
 
-if (is.null(comp_df)) stop("comp_df for that tax rank does not exist.")
-
-## ================================
-## PREPARE DATA
-## ================================
+## Prepare base data
 plot_df <- comp_df %>%
-  mutate(PRJNA = factor(PRJNA)) %>%      # ensure PRJNA is a factor
-  group_by(Organism, PRJNA, Taxon) %>%
+  mutate(PRJNA = factor(PRJNA),
+         Region_amplified = factor(Region_amplified)) %>%
+  group_by(Organism, PRJNA, Region_amplified, Taxon) %>%
   summarise(Abundance = mean(Abundance), .groups = "drop") %>%
   group_by(Organism, PRJNA) %>%
-  mutate(Abundance = Abundance / sum(Abundance)) %>%  # normalise within PRJNA
+  mutate(Abundance = Abundance / sum(Abundance)) %>%
   ungroup()
 
-## ================================
-## COLOUR PALETTE
-## ================================
+## ===========
+## 2. PALETTE
+## ===========
 make_tax_palette <- function(taxa_names) {
   uniq <- unique(taxa_names)
   n <- length(uniq)
@@ -357,44 +358,76 @@ make_tax_palette <- function(taxa_names) {
   cols
 }
 
-pal <- make_tax_palette(plot_df$Taxon)
+tax_pal <- make_tax_palette(plot_df$Taxon)
 
-## ================================
-## SPLIT BY ORGANISM AND PLOT
-## ================================
+## Colour palette for region
+region_pal <- brewer.pal(max(3, length(unique(plot_df$Region_amplified))), "Set2")
+names(region_pal) <- unique(plot_df$Region_amplified)
+
+## ===========
+## 3. LOOP OVER ORGANISMS
+## ===========
 organisms <- unique(plot_df$Organism)
-
 plots_list_optionA <- list()
 
 for (org in organisms) {
   
   df_sub <- plot_df %>% filter(Organism == org)
   
-  p <- ggplot(df_sub, aes(x = PRJNA, y = Abundance, fill = Taxon)) +
+  ## ============================
+  ## MAIN BAR PLOT (Taxonomy)
+  ## ============================
+  p_main <- ggplot(df_sub, aes(x = PRJNA, y = Abundance, fill = Taxon)) +
     geom_bar(stat = "identity") +
-    scale_fill_manual(values = pal, drop = FALSE) +
+    scale_fill_manual(values = tax_pal, drop = FALSE) +
     theme_minimal(base_size = 14) +
     theme(
-      axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
-      strip.text = element_text(face = "bold", size = 16),
-      panel.grid.major.x = element_blank()
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      panel.grid.major.x = element_blank(),
+      plot.margin = margin(5, 5, 0, 5)
     ) +
     labs(
       title = paste("Taxonomic Composition at", rank_to_plot, "\nOrganism:", org),
-      x = "PRJNA Project ID",
+      x = NULL,
       y = "Relative Abundance"
     )
   
-  plots_list_optionA[[org]] <- p
+  ## ============================
+  ## REGION BAR (COLOUR STRIP)
+  ## ============================
+  region_df <- df_sub %>%
+    distinct(PRJNA, Region_amplified)
   
-  ## save each as PNG
+  p_region <- ggplot(region_df, aes(x = PRJNA, y = 1, fill = Region_amplified)) +
+    geom_tile() +
+    scale_fill_manual(values = region_pal, drop = FALSE) +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.title = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks = element_blank(),
+      panel.grid = element_blank(),
+      plot.margin = margin(0, 5, 5, 5),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 10)
+    ) +
+    guides(fill = guide_legend(title = "Region amplified"))
+  
+  ## ============================
+  ## COMBINE MAIN + REGION BAR
+  ## ============================
+  combined <- p_main / p_region + plot_layout(heights = c(4, 0.5))
+  
+  ## Save and store
+  plots_list_optionA[[org]] <- combined
+  
   ggsave(
-    filename = paste0("composition_", rank_to_plot, "_", gsub(" ", "_", org), ".png"),
-    plot = p,
-    width = 10, height = 6, dpi = 300
+    paste0("composition_", rank_to_plot, "_", gsub(" ", "_", org), "_with_region.png"),
+    combined,
+    width = 10, height = 7, dpi = 300
   )
   
-  print(p)  # show each plot one at a time
+  print(combined)
 }
 
 
