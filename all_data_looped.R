@@ -430,9 +430,18 @@ for (org in organisms) {
   print(combined)
 }
 
+library(patchwork)
 
+all_plots <- wrap_plots(plots_list_optionA, ncol = 1)
+all_plots
 
+full_page <- wrap_plots(plots_list_optionA, ncol = 2) +
+  plot_annotation(
+    title = "Taxonomic Composition (Phylum Level) Across All Organisms",
+    theme = theme(plot.title = element_text(size = 18, face = "bold"))
+  )
 
+full_page
 
 ####################################################################
 ######################## PCA #######################################
