@@ -17,7 +17,8 @@ required_cols <- c(
   "Host",
   "Study",
   "Project",
-  "Region_amplified"
+  "Region_amplified",
+  "Habitat"
 )
 
 prjna_codes <- c(
@@ -441,7 +442,7 @@ full_page <- wrap_plots(plots_list_optionA, ncol = 2) +
     theme = theme(plot.title = element_text(size = 18, face = "bold"))
   )
 
-full_page
+#full_page ---- fix it is broken!!
 
 ####################################################################
 ######################## PCA #######################################
@@ -533,6 +534,217 @@ ggplot(pca_df, aes(PC1, PC2, colour = Project)) +
     color = "PRJNA Project",
     x = pc1_lab,
     y = pc2_lab
+  )
+
+############BUG FIXING PCA ######################################
+## ============================================================
+## PCA per organism (separate PCA in each facet) + PRJNA colours
+## + per-facet PC1/PC2 % shown inside each panel + ellipses
+## ============================================================
+
+library(phyloseq)
+library(tidyverse)
+library(purrr)
+library(Polychrome)
+library(colorspace)
+
+## ----------------------------
+## 1) Label each phyloseq object with its PRJNA name (Project)
+## ----------------------------
+# physeq_rarefied_filtered must be a *named* list, names = PRJNA codes
+phy_list_labeled <- imap(physeq_rarefied_filtered, ~{
+  ps <- .x
+  proj <- .y
+  
+  # Ensure sample_data exists
+  if (is.null(sample_data(ps, errorIfNULL = FALSE))) {
+    sample_data(ps) <- data.frame(row.names = sample_names(ps))
+  }
+  
+  sample_data(ps)$Project <- proj
+  ps
+})
+
+## ----------------------------
+## 2) Global palette for ALL PRJNA groups (consistent across facets)
+## ----------------------------
+all_projects <- sort(unique(unlist(
+  map(phy_list_labeled, ~ as.character(sample_data(.x)$Project))
+)))
+
+n_proj <- as.integer(length(all_projects))
+
+pal_vec <- tryCatch(
+  {
+    if (n_proj <= 22) Polychrome::kelly(n_proj) else Polychrome::alphabet(n_proj)
+  },
+  error = function(e) {
+    message("⚠ Polychrome failed, switching to fallback palette.")
+    grDevices::rainbow(n_proj)
+  }
+)
+
+names(pal_vec) <- all_projects
+
+## ----------------------------
+## 3) Helper: union OTU matrix across PRJNA within an organism
+##    (no merge_phyloseq; taxa union is retained, missing taxa filled with 0)
+## ----------------------------
+make_otu_union_matrix <- function(ps_list) {
+  
+  mats <- map(ps_list, ~{
+    otu <- as(otu_table(.x), "matrix")
+    if (taxa_are_rows(.x)) otu <- t(otu)
+    otu
+  })
+  
+  all_taxa <- sort(unique(unlist(map(mats, colnames))))
+  
+  mats_aligned <- map(mats, ~{
+    miss <- setdiff(all_taxa, colnames(.x))
+    if (length(miss) > 0) {
+      add <- matrix(0, nrow = nrow(.x), ncol = length(miss),
+                    dimnames = list(rownames(.x), miss))
+      .x <- cbind(.x, add)
+    }
+    .x[, all_taxa, drop = FALSE]
+  })
+  
+  do.call(rbind, mats_aligned)
+}
+
+## ----------------------------
+## 4) Run PCA separately per organism and return one big dataframe
+## ----------------------------
+all_organisms <- unique(unlist(map(phy_list_labeled, ~ as.character(sample_data(.x)$Organism))))
+all_organisms <- all_organisms[!is.na(all_organisms) & all_organisms != ""]
+
+pca_all_df <- map_dfr(
+  all_organisms,
+  function(org) {
+    
+    # phyloseq objects that contain this organism
+    ps_sub <- keep(phy_list_labeled, ~ any(as.character(sample_data(.x)$Organism) == org))
+    if (length(ps_sub) == 0) return(NULL)
+    
+    # prune each to organism samples
+    ps_sub <- map(ps_sub, ~ prune_samples(as.character(sample_data(.x)$Organism) == org, .x))
+    
+    # drop empties
+    ps_sub <- keep(ps_sub, ~ nsamples(.x) > 1 && ntaxa(.x) > 1)
+    if (length(ps_sub) == 0) return(NULL)
+    
+    # union OTU matrix (samples x taxa)
+    otu_union <- make_otu_union_matrix(ps_sub)
+    
+    # stabilise counts (optional but usually helps)
+    otu_union <- log1p(otu_union)
+    
+    # remove zero-variance taxa
+    keep_cols <- apply(otu_union, 2, var) > 0
+    otu_union <- otu_union[, keep_cols, drop = FALSE]
+    if (ncol(otu_union) < 2) return(NULL)
+    
+    # PCA for THIS organism
+    pca <- prcomp(otu_union, center = TRUE, scale. = TRUE)
+    
+    # variance explained for THIS organism
+    pca_var <- pca$sdev^2
+    pca_var_exp <- pca_var / sum(pca_var)
+    pc1_pct <- round(100 * pca_var_exp[1], 1)
+    pc2_pct <- round(100 * pca_var_exp[2], 1)
+    
+    scores <- as.data.frame(pca$x) %>%
+      tibble::rownames_to_column("SampleID") %>%
+      mutate(
+        Organism = org,
+        pc1_pct = pc1_pct,
+        pc2_pct = pc2_pct
+      )
+    
+    # metadata (coerce to character so bind_rows never type-clashes)
+    meta <- map_dfr(ps_sub, ~{
+      md <- data.frame(sample_data(.x), stringsAsFactors = FALSE)
+      md$SampleID <- rownames(md)
+      md %>% mutate(across(everything(), as.character))
+    }) %>%
+      distinct(SampleID, .keep_all = TRUE) %>%
+      select(-any_of("Organism"))   # avoid Organism.x / Organism.y
+    
+    left_join(scores, meta, by = "SampleID")
+  }
+)
+
+## Ensure Project factor order is stable
+pca_all_df$Project <- factor(as.character(pca_all_df$Project), levels = all_projects)
+
+## ----------------------------
+## 4.5) Build per-facet labels to display PC1/PC2 % inside each panel
+## ----------------------------
+pca_all_df <- pca_all_df %>%
+  mutate(Organism_facet = Organism)
+
+facet_labels <- pca_all_df %>%
+  distinct(Organism_facet, pc1_pct, pc2_pct) %>%
+  group_by(Organism_facet) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(label = paste0("PC1 = ", pc1_pct, "%\nPC2 = ", pc2_pct, "%"))
+
+## Only draw ellipses where there are >= 3 points per Project within facet
+ellipse_df <- pca_all_df %>%
+  count(Organism_facet, Project) %>%
+  filter(n >= 3) %>%
+  select(Organism_facet, Project) %>%
+  inner_join(pca_all_df, by = c("Organism_facet", "Project"))
+
+## Reduce palette to only projects actually present (speeds plotting + legend)
+pal_vec_use <- pal_vec[names(pal_vec) %in% unique(as.character(pca_all_df$Project))]
+
+## ----------------------------
+## 4.6) DISTINCT palette for ~26 PRJNA projects (no shapes)
+## ----------------------------
+proj_levels <- levels(pca_all_df$Project)
+
+# "Dynamic" is very distinct for many groups; HCL keeps it perceptually balanced
+pal_vec_use <- colorspace::qualitative_hcl(
+  n = length(proj_levels),
+  palette = "Dynamic"
+)
+
+names(pal_vec_use) <- proj_levels
+
+
+
+## ----------------------------
+## 5) Plot
+## ----------------------------
+ggplot(pca_all_df, aes(PC1, PC2, colour = Project)) +
+  geom_point(size = 2.5, alpha = 0.85) +
+  stat_ellipse(
+    data = ellipse_df,
+    aes(group = Project),
+    type = "t",
+    level = 0.68,
+    linewidth = 0.6
+  ) +
+  facet_wrap(~ Organism_facet, scales = "free") +
+  geom_text(
+    data = facet_labels,
+    aes(x = -Inf, y = Inf, label = label),
+    inherit.aes = FALSE,
+    hjust = -0.1, vjust = 1.1,
+    size = 3
+  ) +
+  scale_colour_manual(values = pal_vec_use, drop = TRUE) +
+  theme_minimal() +
+  labs(
+    title = "PCA of Microbial Communities by Organism",
+    subtitle = "Separate PCA per organism; colours distinguish PRJNA projects",
+    color = "PRJNA Project",
+    shape = "PRJNA Project",
+    x = "PC1",
+    y = "PC2"
   )
 
 
@@ -1107,10 +1319,67 @@ combined_pcoa_plot <- wrap_plots(plots, ncol = 2, guides = "collect") &
 
 print(combined_pcoa_plot)
 
+## EXTRA DATA/ STATS
+library(vegan)
+
+common_samples <- Reduce(
+  intersect,
+  lapply(dist_mats, function(d) attr(d, "Labels"))
+)
+
+align_dist <- function(d) {
+  as.dist(as.matrix(d)[common_samples, common_samples])
+}
+
+distA <- lapply(dist_mats, align_dist)
+
+set.seed(1)
+
+mantel_results <- data.frame()
+
+for (m in setdiff(names(distA), "bray")) {
+  mt <- mantel(distA$bray, distA[[m]],
+               method = "spearman",
+               permutations = 9999)
+  
+  mantel_results <- rbind(
+    mantel_results,
+    data.frame(
+      Comparison = paste("Bray vs", m),
+      r = mt$statistic,
+      p = mt$signif
+    )
+  )
+}
+
+mantel_results
+
 
 ###############################################################################
 ######################### CORE MICROBIOME ANALYSIS ############################
 ###############################################################################
+tax_levels <- c("Phylum", "Class", "Order", "Family", "Genus")
+
+processed_phyloseq_by_rank <- setNames(vector("list", length(tax_levels)), tax_levels)
+
+for (rank in tax_levels) {
+  cat("\n=== Building processed phyloseq list for rank:", rank, "===\n")
+  
+  processed_phyloseq_by_rank[[rank]] <- lapply(names(physeq_rarefied_filtered), function(nm) {
+    ps <- physeq_rarefied_filtered[[nm]]
+    out <- process_tax_level_safe(ps, rank = rank, mean_threshold = 0.002)
+    out
+  })
+  
+  names(processed_phyloseq_by_rank[[rank]]) <- names(physeq_rarefied_filtered)
+  
+  # drop NULLs (datasets that failed processing)
+  processed_phyloseq_by_rank[[rank]] <- Filter(Negate(is.null), processed_phyloseq_by_rank[[rank]])
+  
+  cat("✓ Kept", length(processed_phyloseq_by_rank[[rank]]), "datasets at rank", rank, "\n")
+}
+
+
 
 # Choose rank for core microbiome (you can change this)
 core_rank <- "Class"   # or "Phylum", "Order", "Family", "Genus"
@@ -1323,7 +1592,7 @@ build_phyloseq_from_comp <- function(comp_df, rank = "Class") {
 ## =========================
 
 # Choose the rank you want for core analysis:
-core_rank <- "Class"   # or "Phylum", "Order", "Family", "Genus"
+core_rank <- "Family"   # or "Phylum", "Order", "Family", "Genus"
 
 # 1. Get the long compositional data for this rank
 comp_df_core <- comp_data_list[[core_rank]]
@@ -1413,7 +1682,12 @@ core_plots_by_species$`P.monodon gut metagenome`
 core_plots_by_species$`P.clarkii gut metagenome`
 core_plots_by_species$`P.leniusculus gut metagenome`
 core_plots_by_species$`M.nipponese gut metagenome`
-x
+
+
+ls()
+exists("physeq_rarefied_filtered")
+exists("comp_data_list")
+exists("processed_phyloseq_by_rank")
 
 
 ###############################################################################
